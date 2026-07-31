@@ -1,0 +1,10 @@
+st.markdown(
+    """
+    <style>
+
+    /* この中身すべて */
+
+    </style>
+    """,
+    unsafe_allow_html=True,
+)

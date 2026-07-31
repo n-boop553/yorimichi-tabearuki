@@ -1,4 +1,4 @@
-from itertools import permutations
+from itertools import combinations
 from pathlib import Path
 
 import networkx as nx
@@ -18,6 +18,7 @@ DATA_DIR = BASE_DIR / "data"
 
 MAX_ROUTE_OVERLAP = 0.60
 ACCEPTABLE_SCORE_GAP = 0.12
+MAX_STOPS = 4
 
 MOOD_WEIGHTS = {
     "バランス重視": {
@@ -107,9 +108,10 @@ st.markdown(
         margin: 0;
     }
 
-    .hero p {
+    .hero p,
+    .route-card p {
         margin: 0.6rem 0 0;
-        opacity: 0.82;
+        opacity: 0.84;
         line-height: 1.7;
     }
 
@@ -160,13 +162,8 @@ def load_data():
             "data/roads.csvが見つかりません。"
         )
 
-    places_df = pd.read_csv(
-        places_path
-    )
-
-    roads_df = pd.read_csv(
-        roads_path
-    )
+    places_df = pd.read_csv(places_path)
+    roads_df = pd.read_csv(roads_path)
 
     required_place_columns = {
         "id",
@@ -357,6 +354,10 @@ food_places = places.loc[
     places["role"] == "stop"
 ].copy()
 
+food_ids = set(
+    food_places["id"].tolist()
+)
+
 food_types = sorted(
     food_places["food_type"]
     .dropna()
@@ -380,47 +381,21 @@ def clamp(value):
     )
 
 
-def connect_waypoints(
-    graph,
-    waypoint_ids,
-):
-    full_path = []
-
-    for first_id, second_id in zip(
-        waypoint_ids,
-        waypoint_ids[1:],
-    ):
-        segment = nx.shortest_path(
-            graph,
-            first_id,
-            second_id,
-            weight="minutes",
-        )
-
-        if full_path:
-            full_path.extend(
-                segment[1:]
-            )
-        else:
-            full_path.extend(
-                segment
-            )
-
-    total_minutes = sum(
+def get_path_minutes(path):
+    return sum(
         float(
-            graph[first][second][
+            route_graph[
+                first
+            ][
+                second
+            ][
                 "minutes"
             ]
         )
         for first, second in zip(
-            full_path,
-            full_path[1:],
+            path,
+            path[1:],
         )
-    )
-
-    return (
-        full_path,
-        total_minutes,
     )
 
 
@@ -439,14 +414,128 @@ def route_edge_set(path):
     }
 
 
+def has_repeated_road(path):
+    """
+    同じ道路を2回以上通っていないか確認する。
+    道路の向きは区別しない。
+    """
+
+    edges = [
+        frozenset(
+            (
+                first,
+                second,
+            )
+        )
+        for first, second in zip(
+            path,
+            path[1:],
+        )
+    ]
+
+    return (
+        len(edges)
+        != len(
+            set(edges)
+        )
+    )
+
+
+def is_simple_route(
+    path,
+    start_id,
+    goal_id,
+):
+    """
+    通常ルートは同じ地点を繰り返さない。
+    周遊ルートは出発地が最後に
+    再登場することだけを許可する。
+    """
+
+    if not path:
+        return False
+
+    if (
+        path[0] != start_id
+        or path[-1] != goal_id
+    ):
+        return False
+
+    if has_repeated_road(
+        path
+    ):
+        return False
+
+    if start_id == goal_id:
+        if len(path) < 4:
+            return False
+
+        internal_nodes = path[
+            1:-1
+        ]
+
+        if (
+            start_id
+            in internal_nodes
+        ):
+            return False
+
+        return (
+            len(internal_nodes)
+            == len(
+                set(
+                    internal_nodes
+                )
+            )
+        )
+
+    return (
+        len(path)
+        == len(
+            set(path)
+        )
+    )
+
+
+def canonical_cycle_key(
+    path
+):
+    """
+    周遊ルートの順方向と逆方向を
+    同一ルートとして扱う。
+    """
+
+    forward = tuple(
+        path
+    )
+
+    backward = tuple(
+        [
+            path[0],
+        ]
+        + list(
+            reversed(
+                path[1:-1]
+            )
+        )
+        + [
+            path[0],
+        ]
+    )
+
+    return min(
+        forward,
+        backward,
+    )
+
+
 def route_overlap(
     first_route,
     second_route,
 ):
     """
-    短い方のルートに含まれる道路のうち、
+    短い方のルートの道路のうち、
     どの程度がもう一方にも含まれるかを計算する。
-    1.0に近いほど、ほぼ同じ道を通る。
     """
 
     first_edges = route_edge_set(
@@ -484,6 +573,121 @@ def is_feasible(route):
         route["time_over"] == 0
         and route["budget_over"] == 0
     )
+
+
+# ==================================================
+# 単純経路・周遊経路
+# ==================================================
+
+def generate_simple_paths(
+    start_id,
+    goal_id,
+):
+    """
+    出発地と目的地が異なる場合の
+    単純経路を列挙する。
+    """
+
+    cutoff = (
+        len(
+            route_graph.nodes
+        )
+        - 1
+    )
+
+    return list(
+        nx.all_simple_paths(
+            route_graph,
+            source=start_id,
+            target=goal_id,
+            cutoff=cutoff,
+        )
+    )
+
+
+def generate_simple_cycles(
+    start_id
+):
+    """
+    出発地へ戻る周遊経路を列挙する。
+    同じ道路を往復するだけの経路は除外する。
+    """
+
+    neighbors = list(
+        route_graph.neighbors(
+            start_id
+        )
+    )
+
+    graph_without_start = (
+        route_graph.copy()
+    )
+
+    graph_without_start.remove_node(
+        start_id
+    )
+
+    cycles = []
+    seen_cycles = set()
+
+    cutoff = (
+        len(
+            route_graph.nodes
+        )
+        - 2
+    )
+
+    for (
+        first_neighbor,
+        second_neighbor,
+    ) in combinations(
+        neighbors,
+        2,
+    ):
+        inner_paths = (
+            nx.all_simple_paths(
+                graph_without_start,
+                source=first_neighbor,
+                target=second_neighbor,
+                cutoff=cutoff,
+            )
+        )
+
+        for inner_path in inner_paths:
+            cycle = [
+                start_id,
+                *inner_path,
+                start_id,
+            ]
+
+            if not is_simple_route(
+                cycle,
+                start_id,
+                start_id,
+            ):
+                continue
+
+            cycle_key = (
+                canonical_cycle_key(
+                    cycle
+                )
+            )
+
+            if (
+                cycle_key
+                in seen_cycles
+            ):
+                continue
+
+            seen_cycles.add(
+                cycle_key
+            )
+
+            cycles.append(
+                cycle
+            )
+
+    return cycles
 
 
 # ==================================================
@@ -527,6 +731,7 @@ def score_route(
             )
             / len(stops)
         )
+
     else:
         food_score = 0.65
 
@@ -543,6 +748,7 @@ def score_route(
                 1,
             )
         )
+
     else:
         time_score = (
             1.0
@@ -573,7 +779,8 @@ def score_route(
         )
 
     target_fullness = (
-        hunger_level + 0.5
+        hunger_level
+        + 0.5
     )
 
     hunger_score = (
@@ -613,13 +820,17 @@ def score_route(
         / len(stops)
     )
 
-    efficiency_score = (
-        direct_minutes
-        / max(
-            total_minutes,
-            1,
+    if direct_minutes > 0:
+        efficiency_score = (
+            direct_minutes
+            / max(
+                total_minutes,
+                1,
+            )
         )
-    )
+
+    else:
+        efficiency_score = 1.0
 
     components = {
         "food": clamp(
@@ -643,8 +854,14 @@ def score_route(
     }
 
     score = sum(
-        MOOD_WEIGHTS[mood][key]
-        * components[key]
+        MOOD_WEIGHTS[
+            mood
+        ][
+            key
+        ]
+        * components[
+            key
+        ]
         for key in MOOD_WEIGHTS[
             mood
         ]
@@ -712,116 +929,128 @@ def generate_candidates(
     hunger_level,
     mood,
 ):
-    try:
-        _, direct_minutes = (
-            connect_waypoints(
-                route_graph,
-                [
-                    start_id,
-                    goal_id,
-                ],
+    if start_id == goal_id:
+        paths = (
+            generate_simple_cycles(
+                start_id
             )
         )
 
-    except nx.NetworkXNoPath:
-        return []
+        if not paths:
+            return []
+
+        direct_minutes = min(
+            get_path_minutes(
+                path
+            )
+            for path in paths
+        )
+
+    else:
+        paths = (
+            generate_simple_paths(
+                start_id,
+                goal_id,
+            )
+        )
+
+        try:
+            direct_minutes = (
+                nx.shortest_path_length(
+                    route_graph,
+                    source=start_id,
+                    target=goal_id,
+                    weight="minutes",
+                )
+            )
+
+        except nx.NetworkXNoPath:
+            return []
 
     candidates = []
-    seen_candidates = set()
+    seen_paths = set()
 
-    food_ids = (
-        food_places["id"]
-        .tolist()
-    )
-
-    for stop_count in (
-        1,
-        2,
-    ):
-        for stop_order in permutations(
-            food_ids,
-            stop_count,
+    for path in paths:
+        if not is_simple_route(
+            path,
+            start_id,
+            goal_id,
         ):
-            try:
-                path, minutes = (
-                    connect_waypoints(
-                        route_graph,
-                        [
-                            start_id,
-                            *stop_order,
-                            goal_id,
-                        ],
-                    )
-                )
+            continue
 
-            except nx.NetworkXNoPath:
-                continue
-
-            if start_id != goal_id:
-                if goal_id in path[:-1]:
-                    continue
-
-                if start_id in path[1:]:
-                    continue
-
-            if (
-                start_id == goal_id
-                and start_id
-                in path[1:-1]
-            ):
-                continue
-
-            candidate_key = (
-                tuple(
-                    stop_order
-                ),
-                tuple(
-                    path
-                ),
-            )
-
-            if (
-                candidate_key
-                in seen_candidates
-            ):
-                continue
-
-            seen_candidates.add(
-                candidate_key
-            )
-
-            stops = [
-                place_by_id[
-                    stop_id
-                ]
-                for stop_id
-                in stop_order
+        stop_ids = [
+            place_id
+            for place_id in path[
+                1:-1
             ]
+            if place_id
+            in food_ids
+        ]
 
-            score_data = score_route(
-                stops=stops,
-                total_minutes=minutes,
-                direct_minutes=direct_minutes,
-                selected_foods=selected_foods,
-                walk_minutes=walk_minutes,
-                budget=budget,
-                hunger_level=hunger_level,
-                mood=mood,
+        if not (
+            1
+            <= len(stop_ids)
+            <= MAX_STOPS
+        ):
+            continue
+
+        if start_id == goal_id:
+            path_key = (
+                canonical_cycle_key(
+                    path
+                )
             )
 
-            candidates.append(
-                {
-                    "path": path,
-                    "stop_ids": list(
-                        stop_order
-                    ),
-                    "stops": stops,
-                    "minutes": round(
-                        minutes
-                    ),
-                    **score_data,
-                }
+        else:
+            path_key = tuple(
+                path
             )
+
+        if (
+            path_key
+            in seen_paths
+        ):
+            continue
+
+        seen_paths.add(
+            path_key
+        )
+
+        stops = [
+            place_by_id[
+                stop_id
+            ]
+            for stop_id in stop_ids
+        ]
+
+        total_minutes = (
+            get_path_minutes(
+                path
+            )
+        )
+
+        score_data = score_route(
+            stops=stops,
+            total_minutes=total_minutes,
+            direct_minutes=direct_minutes,
+            selected_foods=selected_foods,
+            walk_minutes=walk_minutes,
+            budget=budget,
+            hunger_level=hunger_level,
+            mood=mood,
+        )
+
+        candidates.append(
+            {
+                "path": path,
+                "stop_ids": stop_ids,
+                "stops": stops,
+                "minutes": round(
+                    total_minutes
+                ),
+                **score_data,
+            }
+        )
 
     candidates.sort(
         key=lambda route: (
@@ -847,11 +1076,8 @@ def select_top_routes(
     acceptable_score_gap=ACCEPTABLE_SCORE_GAP,
 ):
     """
-    1位と比べて相性スコアの差が12点以内で、
-    ルートの重複率が60％以下の候補を優先する。
-
-    条件に近い別ルートが不足する場合だけ、
-    上位ルートと重なる候補を採用する。
+    相性を大きく落とさない範囲では、
+    上位ルートと異なる道路を通る候補を優先する。
     """
 
     if not candidates:
@@ -892,6 +1118,7 @@ def select_top_routes(
                     route
                 )
             )
+
         else:
             feasibility_ok = True
 
@@ -902,56 +1129,88 @@ def select_top_routes(
 
     acceptable_routes = [
         route
-        for route
-        in candidates[1:]
+        for route in candidates[
+            1:
+        ]
         if is_acceptable(
             route
         )
     ]
 
-    # 第1段階：
-    # 相性を大きく落とさず、
-    # 経路も異なる候補を優先する。
-    for route in acceptable_routes:
-        overlap = max(
-            route_overlap(
-                route,
-                selected_route,
-            )
-            for selected_route
-            in selected
-        )
+    while (
+        len(selected) < count
+        and acceptable_routes
+    ):
+        ranked_choices = []
 
-        if (
-            overlap
-            <= max_overlap
-        ):
-            selected.append(
-                route
+        for route in acceptable_routes:
+            maximum_overlap = max(
+                route_overlap(
+                    route,
+                    selected_route,
+                )
+                for selected_route
+                in selected
             )
 
-            selected_ids.add(
-                id(
-                    route
+            ranked_choices.append(
+                (
+                    maximum_overlap,
+                    -route["score"],
+                    route,
                 )
             )
 
-        if (
-            len(selected)
-            >= count
-        ):
+        ranked_choices.sort(
+            key=lambda item: (
+                item[0],
+                item[1],
+            )
+        )
+
+        (
+            overlap,
+            _,
+            route,
+        ) = ranked_choices[0]
+
+        if overlap > max_overlap:
             break
 
-    # 第2段階：
-    # 別経路が足りない場合だけ、
-    # 相性のよい重複ルートを追加する。
+        selected.append(
+            route
+        )
+
+        selected_ids.add(
+            id(
+                route
+            )
+        )
+
+        acceptable_routes = [
+            candidate
+            for candidate
+            in acceptable_routes
+            if id(
+                candidate
+            )
+            != id(
+                route
+            )
+        ]
+
     if len(selected) < count:
         remaining_acceptable = [
             route
             for route
-            in acceptable_routes
-            if id(route)
-            not in selected_ids
+            in candidates[1:]
+            if (
+                id(route)
+                not in selected_ids
+                and is_acceptable(
+                    route
+                )
+            )
         ]
 
         remaining_acceptable.sort(
@@ -979,17 +1238,13 @@ def select_top_routes(
                 )
             )
 
-            if (
-                len(selected)
-                >= count
-            ):
+            if len(selected) >= count:
                 break
 
-    # 第3段階：
-    # それでも足りない場合は、
-    # 残りをスコア順に補う。
     if len(selected) < count:
-        for route in candidates[1:]:
+        for route in candidates[
+            1:
+        ]:
             if (
                 id(route)
                 in selected_ids
@@ -1006,10 +1261,7 @@ def select_top_routes(
                 )
             )
 
-            if (
-                len(selected)
-                >= count
-            ):
+            if len(selected) >= count:
                 break
 
     annotated_routes = []
@@ -1069,7 +1321,9 @@ def create_reason(
 
     matched_foods = [
         stop["food_type"]
-        for stop in route["stops"]
+        for stop in route[
+            "stops"
+        ]
         if stop["food_type"]
         in selected_foods
     ]
@@ -1105,7 +1359,9 @@ def create_reason(
         str(
             stop["texture"]
         )
-        for stop in route["stops"]
+        for stop in route[
+            "stops"
+        ]
         if pd.notna(
             stop["texture"]
         )
@@ -1126,6 +1382,7 @@ def create_reason(
 
     if same_endpoint:
         reasons.append(
+            "同じ道を往復せず"
             "出発地点に戻れる"
         )
 
@@ -1154,7 +1411,6 @@ def create_route_figure(
 ):
     figure = go.Figure()
 
-    # 全道路
     for _, road in roads.iterrows():
         first = place_by_id[
             road["from_id"]
@@ -1188,7 +1444,6 @@ def create_route_figure(
             )
         )
 
-    # 推薦ルート
     route_x = [
         place_by_id[
             place_id
@@ -1219,7 +1474,6 @@ def create_route_figure(
         )
     )
 
-    # 今回選ばれていない地点
     endpoint_ids = places.loc[
         places["role"].isin(
             [
@@ -1288,14 +1542,14 @@ def create_route_figure(
             )
         )
 
-    # 買い食いスポット
     all_food_places = [
         place_by_id[
             place_id
         ]
         for place_id
-        in food_places["id"]
-        .tolist()
+        in food_places[
+            "id"
+        ].tolist()
     ]
 
     figure.add_trace(
@@ -1316,7 +1570,9 @@ def create_route_figure(
                 for place
                 in all_food_places
             ],
-            textposition="top center",
+            textposition=(
+                "top center"
+            ),
             marker={
                 "size": 15,
                 "symbol": "diamond",
@@ -1351,7 +1607,6 @@ def create_route_figure(
         )
     )
 
-    # 出発地と目的地
     if start_id == goal_id:
         same_place = place_by_id[
             start_id
@@ -1465,13 +1720,14 @@ def create_route_figure(
             )
         )
 
-    # 立ち寄る店を強調
     planned_places = [
         place_by_id[
             place_id
         ]
         for place_id
-        in route["stop_ids"]
+        in route[
+            "stop_ids"
+        ]
     ]
 
     figure.add_trace(
@@ -1489,7 +1745,9 @@ def create_route_figure(
             mode="markers",
             marker={
                 "size": 27,
-                "symbol": "circle-open",
+                "symbol": (
+                    "circle-open"
+                ),
                 "line": {
                     "width": 4,
                     "color": "#f5a0aa",
@@ -1640,13 +1898,15 @@ with right:
         if food in food_types
     ]
 
-    selected_foods = st.multiselect(
-        "食べたいもの",
-        food_types,
-        default=default_foods,
-        placeholder=(
-            "複数選択できます"
-        ),
+    selected_foods = (
+        st.multiselect(
+            "食べたいもの",
+            food_types,
+            default=default_foods,
+            placeholder=(
+                "複数選択できます"
+            ),
+        )
     )
 
     hunger_level = st.slider(
@@ -1661,8 +1921,11 @@ with right:
     )
 
 st.caption(
-    "出発地と目的地は同じ地点でも選べます。"
-    "同じ地点を選ぶと、そこへ戻る周遊ルートを提案します。"
+    "出発地と目的地は"
+    "同じ地点でも選べます。"
+    "同じ地点を選ぶと、"
+    "同じ道を往復しない"
+    "周遊ルートを提案します。"
 )
 
 mood = st.selectbox(
@@ -1703,8 +1966,10 @@ if st.button(
 
     if not recommended_routes:
         st.warning(
-            "条件に合う寄り道ルートを"
-            "作れませんでした。"
+            "同じ道路を繰り返さずに通れる"
+            "寄り道ルートが見つかりませんでした。"
+            "歩ける時間を長くするか、"
+            "出発地・目的地を変更してください。"
         )
 
     else:
@@ -1749,7 +2014,9 @@ if st.button(
                 stop_names = [
                     stop["name"]
                     for stop
-                    in route["stops"]
+                    in route[
+                        "stops"
+                    ]
                 ]
 
                 reason = create_reason(
@@ -1877,7 +2144,9 @@ if st.button(
                             ],
                         }
                         for stop
-                        in route["stops"]
+                        in route[
+                            "stops"
+                        ]
                     ]
                 )
 
@@ -1985,24 +2254,26 @@ with st.expander(
         **コンテンツベース型推薦**を
         組み合わせています。
 
-        NetworkXで出発地・寄り道先・
-        目的地を結ぶ経路を作り、
-        食べたいもの、時間、予算、
-        空腹度、食感の変化、
-        店の珍しさを重み付きで評価します。
+        NetworkXで地点と道路をグラフとして表し、
+        出発地から目的地までの
+        **単純経路**を列挙します。
+
+        出発地と目的地が同じ場合は、
+        同じ道路や地点を途中で繰り返さない
+        **単純な周遊経路**だけを候補にします。
+
+        そのため、同じ道路を通って店へ行き、
+        その道をそのまま戻るルートは
+        推薦候補から除外されます。
+
+        各候補は、食べたいもの、時間、予算、
+        空腹度、食感の変化、店の珍しさを
+        重み付きで評価します。
 
         上位3件を選ぶ際は、
-        立ち寄る店だけでなく、
-        実際に通る道路の重複率も比較します。
-
-        希望条件との相性が
-        大きく下がらない範囲では、
-        上位案と異なる道を通るルートを
+        希望条件との相性を大きく落とさない範囲で、
+        上位案と異なる道路を通るルートを
         優先します。
-
-        別経路の相性スコアが
-        1位より12点以上低くなる場合に限り、
-        一部同じ道を通る候補を表示します。
         """
     )
 

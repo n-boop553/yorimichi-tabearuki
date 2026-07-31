@@ -3,8 +3,9 @@ from pathlib import Path
 
 import networkx as nx
 import pandas as pd
-import plotly.graph_objects as go
 import streamlit as st
+
+from map_view import create_route_figure
 
 
 st.set_page_config(
@@ -13,12 +14,39 @@ st.set_page_config(
     layout="wide",
 )
 
+
+# ==================================================
+# パス・基本設定
+# ==================================================
+
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
+STYLE_PATH = BASE_DIR / "styles.css"
 
 MAX_ROUTE_OVERLAP = 0.60
 ACCEPTABLE_SCORE_GAP = 0.12
 MAX_STOPS = 4
+
+
+# ==================================================
+# CSS読み込み
+# ==================================================
+
+if STYLE_PATH.exists():
+    st.markdown(
+        f"<style>{STYLE_PATH.read_text(encoding='utf-8')}</style>",
+        unsafe_allow_html=True,
+    )
+else:
+    st.warning(
+        "styles.cssが見つからないため、"
+        "標準デザインで表示しています。"
+    )
+
+
+# ==================================================
+# 推薦条件ごとの重み
+# ==================================================
 
 MOOD_WEIGHTS = {
     "バランス重視": {
@@ -62,167 +90,6 @@ MOOD_WEIGHTS = {
         "novelty": 0.35,
     },
 }
-
-
-# ==================================================
-# デザイン
-# ==================================================
-
-st.markdown(
-    """
-    <style>
-    .stApp {
-        background:
-            radial-gradient(
-                circle at 10% 5%,
-                rgba(255, 210, 225, 0.18),
-                transparent 26rem
-            ),
-            radial-gradient(
-                circle at 90% 8%,
-                rgba(220, 205, 255, 0.16),
-                transparent 28rem
-            );
-    }
-
-    .block-container {
-        max-width: 1180px;
-        padding-top: 2rem;
-        padding-bottom: 4rem;
-    }
-
-    .hero,
-    .route-card {
-        padding: 1.2rem 1.4rem;
-        border: 1px solid rgba(235, 162, 190, 0.28);
-        border-radius: 20px;
-        background: rgba(255, 255, 255, 0.05);
-    }
-
-    .hero {
-        margin-bottom: 1.3rem;
-    }
-
-    .hero h1,
-    .route-card h3 {
-        margin: 0;
-    }
-
-    .hero p,
-    .route-card p {
-        margin: 0.6rem 0 0;
-        opacity: 0.84;
-        line-height: 1.7;
-    }
-
-    .route-card {
-        margin: 0.4rem 0 1rem;
-    }
-
-    div[data-testid="stMetric"] {
-        padding: 0.8rem 1rem;
-        border: 1px solid rgba(180, 180, 200, 0.18);
-        border-radius: 15px;
-        background: rgba(255, 255, 255, 0.04);
-    }
-
-    .stButton > button {
-        min-height: 3rem;
-        border-radius: 16px;
-        font-weight: 750;
-    }
-
-    div[data-baseweb="select"] > div,
-    div[data-baseweb="input"] > div {
-        min-height: 3rem;
-        border-radius: 14px !important;
-    }
-
-    .hunger-scale-labels {
-        display: flex;
-        justify-content: space-between;
-        align-items: flex-end;
-        width: 100%;
-        margin: 0.25rem 0 0.15rem;
-        font-size: 0.88rem;
-        font-weight: 650;
-        opacity: 0.88;
-    }
-
-    .hunger-scale-labels span:first-child {
-        text-align: left;
-    }
-
-    .hunger-scale-labels span:last-child {
-        text-align: right;
-    }
-
-    /*
-    見出しの左端から右端までを5等分し、
-    各区画の先頭に空腹度ボタンを配置する。
-    */
-    .st-key-hunger_selector div[data-testid="stHorizontalBlock"] {
-        gap: 0 !important;
-    }
-
-    .st-key-hunger_selector div[data-testid="column"] {
-        padding: 0 !important;
-    }
-
-    .st-key-hunger_selector .stButton {
-        width: 100%;
-    }
-
-    .st-key-hunger_selector .stButton > button {
-        width: 100%;
-        min-height: 2.7rem;
-        padding: 0.2rem 0 !important;
-        border: none !important;
-        border-radius: 8px;
-        background: transparent !important;
-        box-shadow: none !important;
-        color: inherit;
-        justify-content: flex-start !important;
-        text-align: left !important;
-        font-weight: 600;
-        gap: 0.3rem;
-    }
-
-    .st-key-hunger_selector .stButton > button:hover {
-        border: none !important;
-        background: rgba(255, 95, 135, 0.08) !important;
-        color: #ff5f87 !important;
-        transform: none !important;
-    }
-
-    .st-key-hunger_selector .stButton > button:focus {
-        box-shadow: none !important;
-    }
-
-    .st-key-hunger_selector .stButton > button p {
-        margin: 0 !important;
-        white-space: normal !important;
-        overflow-wrap: anywhere;
-        word-break: normal;
-        line-height: 1.25;
-        text-align: left !important;
-    }
-
-    @media (max-width: 700px) {
-        .hunger-scale-labels {
-            font-size: 0.78rem;
-        }
-
-        .st-key-hunger_selector .stButton > button {
-            min-height: 3rem;
-            padding-right: 0.15rem !important;
-            font-size: 0.74rem !important;
-        }
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
 
 
 # ==================================================
@@ -282,13 +149,17 @@ def load_data():
     if missing_places:
         raise ValueError(
             "places.csvに不足している列があります："
-            + ", ".join(sorted(missing_places))
+            + ", ".join(
+                sorted(missing_places)
+            )
         )
 
     if missing_roads:
         raise ValueError(
             "roads.csvに不足している列があります："
-            + ", ".join(sorted(missing_roads))
+            + ", ".join(
+                sorted(missing_roads)
+            )
         )
 
     for column in [
@@ -460,7 +331,11 @@ def clamp(value):
 def get_path_minutes(path):
     return sum(
         float(
-            route_graph[first][second][
+            route_graph[
+                first
+            ][
+                second
+            ][
                 "minutes"
             ]
         )
@@ -628,9 +503,7 @@ def generate_simple_paths(
     )
 
 
-def generate_simple_cycles(
-    start_id
-):
+def generate_simple_cycles(start_id):
     neighbors = list(
         route_graph.neighbors(
             start_id
@@ -744,10 +617,7 @@ def score_route(
     else:
         food_score = 0.65
 
-    if (
-        total_minutes
-        <= walk_minutes
-    ):
+    if total_minutes <= walk_minutes:
         time_score = (
             0.70
             + 0.30
@@ -861,9 +731,7 @@ def score_route(
     score = sum(
         MOOD_WEIGHTS[mood][key]
         * components[key]
-        for key in MOOD_WEIGHTS[
-            mood
-        ]
+        for key in MOOD_WEIGHTS[mood]
     )
 
     score += (
@@ -1058,7 +926,9 @@ def select_top_routes(
         is_feasible(best_route)
     )
 
-    selected = [best_route]
+    selected = [
+        best_route
+    ]
 
     selected_ids = {
         id(best_route)
@@ -1216,7 +1086,7 @@ def select_top_routes(
 
 
 # ==================================================
-# 表示補助
+# 推薦理由
 # ==================================================
 
 def create_reason(
@@ -1302,363 +1172,6 @@ def create_reason(
     )
 
 
-def create_route_figure(
-    route,
-    start_id,
-    goal_id,
-):
-    figure = go.Figure()
-
-    for _, road in roads.iterrows():
-        first = place_by_id[
-            road["from_id"]
-        ]
-
-        second = place_by_id[
-            road["to_id"]
-        ]
-
-        figure.add_trace(
-            go.Scatter(
-                x=[
-                    first["x"],
-                    second["x"],
-                ],
-                y=[
-                    first["y"],
-                    second["y"],
-                ],
-                mode="lines",
-                line={
-                    "width": 2,
-                    "color": (
-                        "rgba("
-                        "150,150,170,.28"
-                        ")"
-                    ),
-                },
-                hoverinfo="skip",
-                showlegend=False,
-            )
-        )
-
-    route_x = [
-        place_by_id[place_id]["x"]
-        for place_id in route["path"]
-    ]
-
-    route_y = [
-        place_by_id[place_id]["y"]
-        for place_id in route["path"]
-    ]
-
-    figure.add_trace(
-        go.Scatter(
-            x=route_x,
-            y=route_y,
-            mode="lines",
-            line={
-                "width": 7,
-                "color": "#ff5f87",
-            },
-            name="おすすめルート",
-            hoverinfo="skip",
-        )
-    )
-
-    endpoint_ids = places.loc[
-        places["role"].isin(
-            [
-                "start",
-                "goal",
-            ]
-        ),
-        "id",
-    ].tolist()
-
-    unselected_endpoint_ids = [
-        endpoint_id
-        for endpoint_id
-        in endpoint_ids
-        if endpoint_id
-        not in {
-            start_id,
-            goal_id,
-        }
-    ]
-
-    if unselected_endpoint_ids:
-        unselected_endpoints = [
-            place_by_id[endpoint_id]
-            for endpoint_id
-            in unselected_endpoint_ids
-        ]
-
-        figure.add_trace(
-            go.Scatter(
-                x=[
-                    place["x"]
-                    for place
-                    in unselected_endpoints
-                ],
-                y=[
-                    place["y"]
-                    for place
-                    in unselected_endpoints
-                ],
-                mode="markers+text",
-                text=[
-                    place["name"]
-                    for place
-                    in unselected_endpoints
-                ],
-                textposition=(
-                    "top center"
-                ),
-                marker={
-                    "size": 14,
-                    "symbol": "circle",
-                    "color": "#9ca3af",
-                    "line": {
-                        "width": 1,
-                        "color": "white",
-                    },
-                },
-                name="選択可能な地点",
-                hovertemplate=(
-                    "<b>%{text}</b>"
-                    "<extra></extra>"
-                ),
-            )
-        )
-
-    all_food_places = [
-        place_by_id[place_id]
-        for place_id
-        in food_places["id"].tolist()
-    ]
-
-    figure.add_trace(
-        go.Scatter(
-            x=[
-                place["x"]
-                for place
-                in all_food_places
-            ],
-            y=[
-                place["y"]
-                for place
-                in all_food_places
-            ],
-            mode="markers+text",
-            text=[
-                place["name"]
-                for place
-                in all_food_places
-            ],
-            textposition="top center",
-            marker={
-                "size": 15,
-                "symbol": "diamond",
-                "color": "#1687d9",
-                "line": {
-                    "width": 1,
-                    "color": "white",
-                },
-            },
-            customdata=[
-                [
-                    place["category"],
-                    place["food_type"],
-                    int(place["price"]),
-                ]
-                for place
-                in all_food_places
-            ],
-            hovertemplate=(
-                "<b>%{text}</b><br>"
-                "種類："
-                "%{customdata[0]}<br>"
-                "食べ物："
-                "%{customdata[1]}<br>"
-                "価格："
-                "%{customdata[2]}円"
-                "<extra></extra>"
-            ),
-            name="買い食いスポット",
-        )
-    )
-
-    if start_id == goal_id:
-        same_place = place_by_id[
-            start_id
-        ]
-
-        figure.add_trace(
-            go.Scatter(
-                x=[same_place["x"]],
-                y=[same_place["y"]],
-                mode="markers+text",
-                text=[
-                    same_place["name"]
-                ],
-                textposition=(
-                    "bottom center"
-                ),
-                marker={
-                    "size": 23,
-                    "symbol": "star",
-                    "color": "#f6c453",
-                    "line": {
-                        "width": 2,
-                        "color": "white",
-                    },
-                },
-                name="出発地・目的地",
-                hovertemplate=(
-                    "<b>%{text}</b><br>"
-                    "出発地・目的地"
-                    "<extra></extra>"
-                ),
-            )
-        )
-
-    else:
-        start_place = place_by_id[
-            start_id
-        ]
-
-        goal_place = place_by_id[
-            goal_id
-        ]
-
-        figure.add_trace(
-            go.Scatter(
-                x=[start_place["x"]],
-                y=[start_place["y"]],
-                mode="markers+text",
-                text=[
-                    start_place["name"]
-                ],
-                textposition=(
-                    "bottom center"
-                ),
-                marker={
-                    "size": 19,
-                    "symbol": "circle",
-                    "color": "#d9e2ef",
-                    "line": {
-                        "width": 2,
-                        "color": "white",
-                    },
-                },
-                name="出発地",
-                hovertemplate=(
-                    "<b>%{text}</b><br>"
-                    "出発地"
-                    "<extra></extra>"
-                ),
-            )
-        )
-
-        figure.add_trace(
-            go.Scatter(
-                x=[goal_place["x"]],
-                y=[goal_place["y"]],
-                mode="markers+text",
-                text=[
-                    goal_place["name"]
-                ],
-                textposition=(
-                    "bottom center"
-                ),
-                marker={
-                    "size": 22,
-                    "symbol": "star",
-                    "color": "#54a8e8",
-                    "line": {
-                        "width": 2,
-                        "color": "white",
-                    },
-                },
-                name="目的地",
-                hovertemplate=(
-                    "<b>%{text}</b><br>"
-                    "目的地"
-                    "<extra></extra>"
-                ),
-            )
-        )
-
-    planned_places = [
-        place_by_id[place_id]
-        for place_id
-        in route["stop_ids"]
-    ]
-
-    figure.add_trace(
-        go.Scatter(
-            x=[
-                place["x"]
-                for place
-                in planned_places
-            ],
-            y=[
-                place["y"]
-                for place
-                in planned_places
-            ],
-            mode="markers",
-            marker={
-                "size": 27,
-                "symbol": "circle-open",
-                "line": {
-                    "width": 4,
-                    "color": "#f5a0aa",
-                },
-            },
-            name="立ち寄る店",
-            hoverinfo="skip",
-        )
-    )
-
-    figure.update_layout(
-        height=520,
-        margin={
-            "l": 10,
-            "r": 10,
-            "t": 25,
-            "b": 10,
-        },
-        xaxis={
-            "visible": False,
-            "range": [
-                places["x"].min() - 1,
-                places["x"].max() + 1,
-            ],
-        },
-        yaxis={
-            "visible": False,
-            "range": [
-                places["y"].min() - 1,
-                places["y"].max() + 1,
-            ],
-            "scaleanchor": "x",
-            "scaleratio": 1,
-        },
-        legend={
-            "orientation": "h",
-            "yanchor": "bottom",
-            "y": 1.02,
-            "xanchor": "left",
-            "x": 0,
-        },
-        hovermode="closest",
-    )
-
-    return figure
-
-
 # ==================================================
 # 画面
 # ==================================================
@@ -1666,19 +1179,23 @@ def create_route_figure(
 st.markdown(
     """
     <div class="hero">
+        <div class="hero-eyebrow">
+            OYATSU × WALK
+        </div>
+
         <h1>
             🥐 買い食い散歩ルート推薦
         </h1>
+
         <p>
-            目的地まで歩きながら、
-            その日の気分に合う
-            買い食いスポットと
-            寄り道ルートを提案します。
+            目的地まで歩きながら、その日の気分に合う
+            買い食いスポットと寄り道ルートを提案します。
         </p>
     </div>
     """,
     unsafe_allow_html=True,
 )
+
 
 metric1, metric2, metric3 = (
     st.columns(3)
@@ -1702,9 +1219,13 @@ with metric3:
         f"{len(roads)}本",
     )
 
-st.subheader("散歩の条件")
+
+st.subheader(
+    "散歩の条件"
+)
 
 left, right = st.columns(2)
+
 
 with left:
     start_name = st.selectbox(
@@ -1730,6 +1251,7 @@ with left:
         step=100,
         format="%d円",
     )
+
 
 with right:
     default_goal_index = (
@@ -1779,11 +1301,26 @@ with right:
         st.session_state.hunger_level = 3
 
     hunger_options = [
-        (5, "かなり"),
-        (4, "やや"),
-        (3, "ふつう"),
-        (2, "少し"),
-        (1, "なし"),
+        (
+            5,
+            "かなり",
+        ),
+        (
+            4,
+            "やや",
+        ),
+        (
+            3,
+            "ふつう",
+        ),
+        (
+            2,
+            "少し",
+        ),
+        (
+            1,
+            "なし",
+        ),
     ]
 
     selected_hunger = int(
@@ -1831,20 +1368,22 @@ with right:
                     key=f"hunger_{value}",
                     width="stretch",
                 ):
-                    st.session_state.hunger_level = value
+                    st.session_state.hunger_level = (
+                        value
+                    )
                     st.rerun()
 
     hunger_level = int(
         st.session_state.hunger_level
     )
 
+
 st.caption(
-    "出発地と目的地は"
-    "同じ地点でも選べます。"
-    "同じ地点を選ぶと、"
-    "同じ道を往復しない"
+    "出発地と目的地は同じ地点でも選べます。"
+    "同じ地点を選ぶと、同じ道を往復しない"
     "周遊ルートを提案します。"
 )
+
 
 mood = st.selectbox(
     "今日の気分",
@@ -1852,6 +1391,7 @@ mood = st.selectbox(
         MOOD_WEIGHTS.keys()
     ),
 )
+
 
 if st.button(
     "おすすめルートを見る",
@@ -2137,6 +1677,10 @@ if st.button(
                             route=route,
                             start_id=start_id,
                             goal_id=goal_id,
+                            places=places,
+                            roads=roads,
+                            place_by_id=place_by_id,
+                            food_places=food_places,
                         ),
                         width="stretch",
                         config={
@@ -2156,6 +1700,7 @@ if st.button(
                         "条件内の候補が少ないため、"
                         "近い案として表示しています。"
                     )
+
 
 with st.expander(
     "この推薦システムの仕組み"
@@ -2186,6 +1731,7 @@ with st.expander(
         優先します。
         """
     )
+
 
 st.caption(
     "このデモでは架空の街・"

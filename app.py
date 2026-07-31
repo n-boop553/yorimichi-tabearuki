@@ -139,35 +139,53 @@ st.markdown(
     }
 
     .hunger-scale-labels {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        margin: 0.2rem 0 0.1rem;
+        display: grid;
+        grid-template-columns: repeat(5, minmax(0, 1fr));
+        width: 100%;
+        margin: 0.2rem 0 0.3rem;
         font-size: 0.88rem;
         font-weight: 650;
         opacity: 0.88;
     }
 
+    .hunger-scale-labels span:first-child {
+        grid-column: 1 / 3;
+        text-align: left;
+    }
+
+    .hunger-scale-labels span:last-child {
+        grid-column: 4 / 6;
+        text-align: right;
+    }
+
     div[data-testid="stRadio"] div[role="radiogroup"] {
-        display: flex;
-        justify-content: space-between;
-        width: 100%;
-        gap: 0.25rem;
+        display: grid !important;
+        grid-template-columns: repeat(5, minmax(0, 1fr)) !important;
+        width: 100% !important;
+        gap: 0 !important;
     }
 
     div[data-testid="stRadio"] div[role="radiogroup"] > label {
-        flex: 1;
-        justify-content: center;
-        margin: 0;
+        display: flex !important;
+        justify-content: center !important;
+        align-items: center !important;
+        width: 100% !important;
+        margin: 0 !important;
+        padding: 0.25rem 0 !important;
+    }
+
+    div[data-testid="stRadio"] div[role="radiogroup"] > label p {
+        white-space: nowrap !important;
+        margin: 0 !important;
     }
 
     @media (max-width: 700px) {
-        div[data-testid="stRadio"] div[role="radiogroup"] {
-            gap: 0;
+        .hunger-scale-labels {
+            font-size: 0.78rem;
         }
 
         div[data-testid="stRadio"] div[role="radiogroup"] > label {
-            font-size: 0.78rem;
+            font-size: 0.74rem !important;
         }
     }
     </style>
@@ -1143,9 +1161,11 @@ def select_top_routes(
         return []
 
     best_route = candidates[0]
+
     best_score = best_route[
         "score"
     ]
+
     best_is_feasible = is_feasible(
         best_route
     )
@@ -1200,39 +1220,29 @@ def select_top_routes(
         ) < count
         and acceptable_routes
     ):
-        ranked_choices = []
-
-        for route in acceptable_routes:
-            maximum_overlap = max(
-                route_overlap(
-                    route,
-                    selected_route,
-                )
-                for selected_route in selected
-            )
-
-            ranked_choices.append(
-                (
-                    maximum_overlap,
-                    -route[
-                        "score"
-                    ],
-                    route,
-                )
-            )
-
-        ranked_choices.sort(
-            key=lambda item: (
-                item[0],
-                item[1],
-            )
+        route = min(
+            acceptable_routes,
+            key=lambda candidate: (
+                max(
+                    route_overlap(
+                        candidate,
+                        selected_route,
+                    )
+                    for selected_route in selected
+                ),
+                -candidate[
+                    "score"
+                ],
+            ),
         )
 
-        (
-            overlap,
-            _,
-            route,
-        ) = ranked_choices[0]
+        overlap = max(
+            route_overlap(
+                route,
+                selected_route,
+            )
+            for selected_route in selected
+        )
 
         if overlap > max_overlap:
             break

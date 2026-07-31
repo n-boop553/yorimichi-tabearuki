@@ -1176,24 +1176,17 @@ def create_reason(
 # 画面
 # ==================================================
 
-st.markdown(
+st.html(
     """
-    <div class="hero">
-        <div class="hero-eyebrow">
-            OYATSU × WALK
-        </div>
-
-        <h1>
-            🥐 買い食い散歩ルート推薦
-        </h1>
-
-        <p>
-            目的地まで歩きながら、その日の気分に合う
-            買い食いスポットと寄り道ルートを提案します。
-        </p>
-    </div>
-    """,
-    unsafe_allow_html=True,
+<div class="hero">
+    <div class="hero-eyebrow">OYATSU × WALK</div>
+    <h1>🥐 買い食い散歩ルート推薦</h1>
+    <p>
+        目的地まで歩きながら、その日の気分に合う<br>
+        買い食いスポットと寄り道ルートを提案します。
+    </p>
+</div>
+    """
 )
 
 

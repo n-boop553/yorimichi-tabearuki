@@ -6,6 +6,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+
 st.set_page_config(
     page_title="買い食い散歩ルート推薦",
     page_icon="🥐",
@@ -14,6 +15,9 @@ st.set_page_config(
 
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = BASE_DIR / "data"
+
+MAX_ROUTE_OVERLAP = 0.60
+ACCEPTABLE_SCORE_GAP = 0.12
 
 MOOD_WEIGHTS = {
     "バランス重視": {
@@ -58,6 +62,11 @@ MOOD_WEIGHTS = {
     },
 }
 
+
+# ==================================================
+# デザイン
+# ==================================================
+
 st.markdown(
     """
     <style>
@@ -101,6 +110,7 @@ st.markdown(
     .hero p {
         margin: 0.6rem 0 0;
         opacity: 0.82;
+        line-height: 1.7;
     }
 
     .route-card {
@@ -131,6 +141,10 @@ st.markdown(
 )
 
 
+# ==================================================
+# データ読み込み
+# ==================================================
+
 @st.cache_data
 def load_data():
     places_path = DATA_DIR / "places.csv"
@@ -146,10 +160,15 @@ def load_data():
             "data/roads.csvが見つかりません。"
         )
 
-    places_df = pd.read_csv(places_path)
-    roads_df = pd.read_csv(roads_path)
+    places_df = pd.read_csv(
+        places_path
+    )
 
-    place_columns = {
+    roads_df = pd.read_csv(
+        roads_path
+    )
+
+    required_place_columns = {
         "id",
         "name",
         "role",
@@ -163,7 +182,7 @@ def load_data():
         "novelty",
     }
 
-    road_columns = {
+    required_road_columns = {
         "from_id",
         "to_id",
         "minutes",
@@ -172,22 +191,29 @@ def load_data():
     }
 
     missing_places = (
-        place_columns - set(places_df.columns)
+        required_place_columns
+        - set(places_df.columns)
     )
+
     missing_roads = (
-        road_columns - set(roads_df.columns)
+        required_road_columns
+        - set(roads_df.columns)
     )
 
     if missing_places:
         raise ValueError(
             "places.csvに不足している列があります："
-            + ", ".join(sorted(missing_places))
+            + ", ".join(
+                sorted(missing_places)
+            )
         )
 
     if missing_roads:
         raise ValueError(
             "roads.csvに不足している列があります："
-            + ", ".join(sorted(missing_roads))
+            + ", ".join(
+                sorted(missing_roads)
+            )
         )
 
     for column in [
@@ -212,47 +238,62 @@ def load_data():
             errors="coerce",
         )
 
-    if places_df[
-        [
-            "x",
-            "y",
-            "price",
-            "fullness",
-            "novelty",
+    if (
+        places_df[
+            [
+                "x",
+                "y",
+                "price",
+                "fullness",
+                "novelty",
+            ]
         ]
-    ].isna().any().any():
+        .isna()
+        .any()
+        .any()
+    ):
         raise ValueError(
-            "places.csvの数値列に読み取れない値があります。"
+            "places.csvの数値列に"
+            "読み取れない値があります。"
         )
 
-    if roads_df[
-        [
-            "minutes",
-            "quietness",
-            "scenery",
+    if (
+        roads_df[
+            [
+                "minutes",
+                "quietness",
+                "scenery",
+            ]
         ]
-    ].isna().any().any():
+        .isna()
+        .any()
+        .any()
+    ):
         raise ValueError(
-            "roads.csvの数値列に読み取れない値があります。"
+            "roads.csvの数値列に"
+            "読み取れない値があります。"
         )
 
     return places_df, roads_df
 
 
-@st.cache_resource
 def build_graph(
-    place_records,
-    road_records,
+    places_df,
+    roads_df,
 ):
     graph = nx.Graph()
 
-    for place in place_records:
+    for place in places_df.to_dict(
+        "records"
+    ):
         graph.add_node(
             place["id"],
             **place,
         )
 
-    for road in road_records:
+    for road in roads_df.to_dict(
+        "records"
+    ):
         graph.add_edge(
             road["from_id"],
             road["to_id"],
@@ -278,17 +319,15 @@ except (
     ValueError,
     pd.errors.ParserError,
 ) as error:
-    st.error(str(error))
+    st.error(
+        str(error)
+    )
     st.stop()
 
 
 route_graph = build_graph(
-    tuple(
-        places.to_dict("records")
-    ),
-    tuple(
-        roads.to_dict("records")
-    ),
+    places,
+    roads,
 )
 
 place_by_id = (
@@ -304,13 +343,13 @@ name_to_id = dict(
     )
 )
 
-start_places = places.loc[
-    places["role"] == "start",
-    "name",
-].tolist()
-
-goal_places = places.loc[
-    places["role"] == "goal",
+endpoint_places = places.loc[
+    places["role"].isin(
+        [
+            "start",
+            "goal",
+        ]
+    ),
     "name",
 ].tolist()
 
@@ -326,6 +365,10 @@ food_types = sorted(
     .tolist()
 )
 
+
+# ==================================================
+# 共通計算
+# ==================================================
 
 def clamp(value):
     return max(
@@ -354,14 +397,16 @@ def connect_waypoints(
             weight="minutes",
         )
 
-        if not full_path:
-            full_path.extend(segment)
-        else:
+        if full_path:
             full_path.extend(
                 segment[1:]
             )
+        else:
+            full_path.extend(
+                segment
+            )
 
-    minutes = sum(
+    total_minutes = sum(
         float(
             graph[first][second][
                 "minutes"
@@ -373,8 +418,77 @@ def connect_waypoints(
         )
     )
 
-    return full_path, minutes
+    return (
+        full_path,
+        total_minutes,
+    )
 
+
+def route_edge_set(path):
+    return {
+        frozenset(
+            (
+                first,
+                second,
+            )
+        )
+        for first, second in zip(
+            path,
+            path[1:],
+        )
+    }
+
+
+def route_overlap(
+    first_route,
+    second_route,
+):
+    """
+    短い方のルートに含まれる道路のうち、
+    どの程度がもう一方にも含まれるかを計算する。
+    1.0に近いほど、ほぼ同じ道を通る。
+    """
+
+    first_edges = route_edge_set(
+        first_route["path"]
+    )
+
+    second_edges = route_edge_set(
+        second_route["path"]
+    )
+
+    if (
+        not first_edges
+        or not second_edges
+    ):
+        return 1.0
+
+    shared_edges = (
+        first_edges
+        & second_edges
+    )
+
+    smaller_size = min(
+        len(first_edges),
+        len(second_edges),
+    )
+
+    return (
+        len(shared_edges)
+        / smaller_size
+    )
+
+
+def is_feasible(route):
+    return (
+        route["time_over"] == 0
+        and route["budget_over"] == 0
+    )
+
+
+# ==================================================
+# 推薦スコア
+# ==================================================
 
 def score_route(
     stops,
@@ -387,12 +501,16 @@ def score_route(
     mood,
 ):
     total_price = sum(
-        int(stop["price"])
+        int(
+            stop["price"]
+        )
         for stop in stops
     )
 
     total_fullness = sum(
-        float(stop["fullness"])
+        float(
+            stop["fullness"]
+        )
         for stop in stops
     )
 
@@ -412,7 +530,10 @@ def score_route(
     else:
         food_score = 0.65
 
-    if total_minutes <= walk_minutes:
+    if (
+        total_minutes
+        <= walk_minutes
+    ):
         time_score = (
             0.70
             + 0.30
@@ -437,6 +558,7 @@ def score_route(
 
     if total_price <= budget:
         budget_score = 1.0
+
     else:
         budget_score = (
             1.0
@@ -467,7 +589,9 @@ def score_route(
     )
 
     textures = {
-        str(stop["texture"])
+        str(
+            stop["texture"]
+        )
         for stop in stops
         if pd.notna(
             stop["texture"]
@@ -481,7 +605,9 @@ def score_route(
 
     novelty_score = (
         sum(
-            float(stop["novelty"])
+            float(
+                stop["novelty"]
+            )
             for stop in stops
         )
         / len(stops)
@@ -519,8 +645,9 @@ def score_route(
     score = sum(
         MOOD_WEIGHTS[mood][key]
         * components[key]
-        for key
-        in MOOD_WEIGHTS[mood]
+        for key in MOOD_WEIGHTS[
+            mood
+        ]
     )
 
     score += (
@@ -572,6 +699,10 @@ def score_route(
     }
 
 
+# ==================================================
+# ルート候補生成
+# ==================================================
+
 def generate_candidates(
     start_id,
     goal_id,
@@ -591,18 +722,22 @@ def generate_candidates(
                 ],
             )
         )
+
     except nx.NetworkXNoPath:
         return []
 
     candidates = []
-    seen = set()
+    seen_candidates = set()
 
     food_ids = (
         food_places["id"]
         .tolist()
     )
 
-    for stop_count in (1, 2):
+    for stop_count in (
+        1,
+        2,
+    ):
         for stop_order in permutations(
             food_ids,
             stop_count,
@@ -622,15 +757,36 @@ def generate_candidates(
             except nx.NetworkXNoPath:
                 continue
 
-            candidate_key = (
-                tuple(stop_order),
-                tuple(path),
-            )
+            if start_id != goal_id:
+                if goal_id in path[:-1]:
+                    continue
 
-            if candidate_key in seen:
+                if start_id in path[1:]:
+                    continue
+
+            if (
+                start_id == goal_id
+                and start_id
+                in path[1:-1]
+            ):
                 continue
 
-            seen.add(
+            candidate_key = (
+                tuple(
+                    stop_order
+                ),
+                tuple(
+                    path
+                ),
+            )
+
+            if (
+                candidate_key
+                in seen_candidates
+            ):
+                continue
+
+            seen_candidates.add(
                 candidate_key
             )
 
@@ -643,14 +799,14 @@ def generate_candidates(
             ]
 
             score_data = score_route(
-                stops,
-                minutes,
-                direct_minutes,
-                selected_foods,
-                walk_minutes,
-                budget,
-                hunger_level,
-                mood,
+                stops=stops,
+                total_minutes=minutes,
+                direct_minutes=direct_minutes,
+                selected_foods=selected_foods,
+                walk_minutes=walk_minutes,
+                budget=budget,
+                hunger_level=hunger_level,
+                mood=mood,
             )
 
             candidates.append(
@@ -669,10 +825,9 @@ def generate_candidates(
 
     candidates.sort(
         key=lambda route: (
-            route["time_over"] == 0
-            and route[
-                "budget_over"
-            ] == 0,
+            is_feasible(
+                route
+            ),
             route["score"],
         ),
         reverse=True,
@@ -681,34 +836,226 @@ def generate_candidates(
     return candidates
 
 
+# ==================================================
+# 上位3ルートの選択
+# ==================================================
+
 def select_top_routes(
     candidates,
     count=3,
+    max_overlap=MAX_ROUTE_OVERLAP,
+    acceptable_score_gap=ACCEPTABLE_SCORE_GAP,
 ):
-    selected = []
-    used_stop_sets = set()
+    """
+    1位と比べて相性スコアの差が12点以内で、
+    ルートの重複率が60％以下の候補を優先する。
 
-    for route in candidates:
-        stop_set = frozenset(
-            route["stop_ids"]
+    条件に近い別ルートが不足する場合だけ、
+    上位ルートと重なる候補を採用する。
+    """
+
+    if not candidates:
+        return []
+
+    best_route = candidates[0]
+
+    best_score = (
+        best_route["score"]
+    )
+
+    best_is_feasible = (
+        is_feasible(
+            best_route
+        )
+    )
+
+    selected = [
+        best_route
+    ]
+
+    selected_ids = {
+        id(
+            best_route
+        )
+    }
+
+    def is_acceptable(route):
+        score_ok = (
+            route["score"]
+            >= best_score
+            - acceptable_score_gap
         )
 
-        if stop_set in used_stop_sets:
-            continue
+        if best_is_feasible:
+            feasibility_ok = (
+                is_feasible(
+                    route
+                )
+            )
+        else:
+            feasibility_ok = True
 
-        selected.append(
+        return (
+            score_ok
+            and feasibility_ok
+        )
+
+    acceptable_routes = [
+        route
+        for route
+        in candidates[1:]
+        if is_acceptable(
+            route
+        )
+    ]
+
+    # 第1段階：
+    # 相性を大きく落とさず、
+    # 経路も異なる候補を優先する。
+    for route in acceptable_routes:
+        overlap = max(
+            route_overlap(
+                route,
+                selected_route,
+            )
+            for selected_route
+            in selected
+        )
+
+        if (
+            overlap
+            <= max_overlap
+        ):
+            selected.append(
+                route
+            )
+
+            selected_ids.add(
+                id(
+                    route
+                )
+            )
+
+        if (
+            len(selected)
+            >= count
+        ):
+            break
+
+    # 第2段階：
+    # 別経路が足りない場合だけ、
+    # 相性のよい重複ルートを追加する。
+    if len(selected) < count:
+        remaining_acceptable = [
+            route
+            for route
+            in acceptable_routes
+            if id(route)
+            not in selected_ids
+        ]
+
+        remaining_acceptable.sort(
+            key=lambda route: (
+                max(
+                    route_overlap(
+                        route,
+                        selected_route,
+                    )
+                    for selected_route
+                    in selected
+                ),
+                -route["score"],
+            )
+        )
+
+        for route in remaining_acceptable:
+            selected.append(
+                route
+            )
+
+            selected_ids.add(
+                id(
+                    route
+                )
+            )
+
+            if (
+                len(selected)
+                >= count
+            ):
+                break
+
+    # 第3段階：
+    # それでも足りない場合は、
+    # 残りをスコア順に補う。
+    if len(selected) < count:
+        for route in candidates[1:]:
+            if (
+                id(route)
+                in selected_ids
+            ):
+                continue
+
+            selected.append(
+                route
+            )
+
+            selected_ids.add(
+                id(
+                    route
+                )
+            )
+
+            if (
+                len(selected)
+                >= count
+            ):
+                break
+
+    annotated_routes = []
+
+    for index, route in enumerate(
+        selected
+    ):
+        annotated_route = dict(
             route
         )
 
-        used_stop_sets.add(
-            stop_set
+        if index == 0:
+            overlap_with_higher = 0.0
+
+        else:
+            overlap_with_higher = max(
+                route_overlap(
+                    route,
+                    higher_route,
+                )
+                for higher_route
+                in selected[:index]
+            )
+
+        annotated_route[
+            "overlap_with_higher"
+        ] = overlap_with_higher
+
+        annotated_route[
+            "diversity_fallback"
+        ] = (
+            index > 0
+            and overlap_with_higher
+            > max_overlap
         )
 
-        if len(selected) == count:
-            break
+        annotated_routes.append(
+            annotated_route
+        )
 
-    return selected
+    return annotated_routes
 
+
+# ==================================================
+# 推薦理由
+# ==================================================
 
 def create_reason(
     selected_foods,
@@ -716,22 +1063,23 @@ def create_reason(
     walk_minutes,
     budget,
     mood,
+    same_endpoint,
 ):
     reasons = []
 
-    matched = [
+    matched_foods = [
         stop["food_type"]
         for stop in route["stops"]
         if stop["food_type"]
         in selected_foods
     ]
 
-    if matched:
+    if matched_foods:
         reasons.append(
             "食べたいもの（"
             + "・".join(
                 dict.fromkeys(
-                    matched
+                    matched_foods
                 )
             )
             + "）を楽しめる"
@@ -754,9 +1102,10 @@ def create_reason(
         )
 
     textures = {
-        str(stop["texture"])
-        for stop
-        in route["stops"]
+        str(
+            stop["texture"]
+        )
+        for stop in route["stops"]
         if pd.notna(
             stop["texture"]
         )
@@ -775,9 +1124,15 @@ def create_reason(
             "珍しさの高い店を含む"
         )
 
+    if same_endpoint:
+        reasons.append(
+            "出発地点に戻れる"
+        )
+
     if not reasons:
         reasons.append(
-            "入力した条件全体との相性が高い"
+            "入力した条件全体との"
+            "相性が高い"
         )
 
     return (
@@ -788,11 +1143,18 @@ def create_reason(
     )
 
 
+# ==================================================
+# ダミー地図
+# ==================================================
+
 def create_route_figure(
     route,
+    start_id,
+    goal_id,
 ):
     figure = go.Figure()
 
+    # 全道路
     for _, road in roads.iterrows():
         first = place_by_id[
             road["from_id"]
@@ -826,6 +1188,7 @@ def create_route_figure(
             )
         )
 
+    # 推薦ルート
     route_x = [
         place_by_id[
             place_id
@@ -856,74 +1219,254 @@ def create_route_figure(
         )
     )
 
-    symbols = {
-        "start": "circle",
-        "goal": "star",
-        "stop": "diamond",
-    }
+    # 今回選ばれていない地点
+    endpoint_ids = places.loc[
+        places["role"].isin(
+            [
+                "start",
+                "goal",
+            ]
+        ),
+        "id",
+    ].tolist()
 
-    labels = {
-        "start": "出発地",
-        "goal": "目的地",
-        "stop": "買い食いスポット",
-    }
+    unselected_endpoint_ids = [
+        endpoint_id
+        for endpoint_id
+        in endpoint_ids
+        if endpoint_id
+        not in {
+            start_id,
+            goal_id,
+        }
+    ]
 
-    for role in [
-        "start",
-        "goal",
-        "stop",
-    ]:
-        role_places = places[
-            places["role"] == role
-        ].copy()
-
-        role_places[
-            "food_type"
-        ] = role_places[
-            "food_type"
-        ].fillna("")
+    if unselected_endpoint_ids:
+        unselected_endpoints = [
+            place_by_id[
+                endpoint_id
+            ]
+            for endpoint_id
+            in unselected_endpoint_ids
+        ]
 
         figure.add_trace(
             go.Scatter(
-                x=role_places["x"],
-                y=role_places["y"],
+                x=[
+                    place["x"]
+                    for place
+                    in unselected_endpoints
+                ],
+                y=[
+                    place["y"]
+                    for place
+                    in unselected_endpoints
+                ],
                 mode="markers+text",
-                text=role_places["name"],
+                text=[
+                    place["name"]
+                    for place
+                    in unselected_endpoints
+                ],
                 textposition=(
                     "top center"
                 ),
                 marker={
-                    "size": 16,
-                    "symbol": symbols[
-                        role
-                    ],
+                    "size": 14,
+                    "symbol": "circle",
+                    "color": "#9ca3af",
                     "line": {
                         "width": 1,
                         "color": "white",
                     },
                 },
-                customdata=role_places[
-                    [
-                        "category",
-                        "food_type",
-                        "price",
-                    ]
-                ].to_numpy(),
+                name="選択可能な地点",
                 hovertemplate=(
-                    "<b>%{text}</b><br>"
-                    "種類："
-                    "%{customdata[0]}<br>"
-                    "食べ物："
-                    "%{customdata[1]}<br>"
-                    "価格："
-                    "%{customdata[2]}円"
+                    "<b>%{text}</b>"
                     "<extra></extra>"
                 ),
-                name=labels[role],
             )
         )
 
-    planned = [
+    # 買い食いスポット
+    all_food_places = [
+        place_by_id[
+            place_id
+        ]
+        for place_id
+        in food_places["id"]
+        .tolist()
+    ]
+
+    figure.add_trace(
+        go.Scatter(
+            x=[
+                place["x"]
+                for place
+                in all_food_places
+            ],
+            y=[
+                place["y"]
+                for place
+                in all_food_places
+            ],
+            mode="markers+text",
+            text=[
+                place["name"]
+                for place
+                in all_food_places
+            ],
+            textposition="top center",
+            marker={
+                "size": 15,
+                "symbol": "diamond",
+                "color": "#1687d9",
+                "line": {
+                    "width": 1,
+                    "color": "white",
+                },
+            },
+            customdata=[
+                [
+                    place["category"],
+                    place["food_type"],
+                    int(
+                        place["price"]
+                    ),
+                ]
+                for place
+                in all_food_places
+            ],
+            hovertemplate=(
+                "<b>%{text}</b><br>"
+                "種類："
+                "%{customdata[0]}<br>"
+                "食べ物："
+                "%{customdata[1]}<br>"
+                "価格："
+                "%{customdata[2]}円"
+                "<extra></extra>"
+            ),
+            name="買い食いスポット",
+        )
+    )
+
+    # 出発地と目的地
+    if start_id == goal_id:
+        same_place = place_by_id[
+            start_id
+        ]
+
+        figure.add_trace(
+            go.Scatter(
+                x=[
+                    same_place["x"]
+                ],
+                y=[
+                    same_place["y"]
+                ],
+                mode="markers+text",
+                text=[
+                    same_place["name"]
+                ],
+                textposition=(
+                    "bottom center"
+                ),
+                marker={
+                    "size": 23,
+                    "symbol": "star",
+                    "color": "#f6c453",
+                    "line": {
+                        "width": 2,
+                        "color": "white",
+                    },
+                },
+                name="出発地・目的地",
+                hovertemplate=(
+                    "<b>%{text}</b><br>"
+                    "出発地・目的地"
+                    "<extra></extra>"
+                ),
+            )
+        )
+
+    else:
+        start_place = place_by_id[
+            start_id
+        ]
+
+        goal_place = place_by_id[
+            goal_id
+        ]
+
+        figure.add_trace(
+            go.Scatter(
+                x=[
+                    start_place["x"]
+                ],
+                y=[
+                    start_place["y"]
+                ],
+                mode="markers+text",
+                text=[
+                    start_place["name"]
+                ],
+                textposition=(
+                    "bottom center"
+                ),
+                marker={
+                    "size": 19,
+                    "symbol": "circle",
+                    "color": "#d9e2ef",
+                    "line": {
+                        "width": 2,
+                        "color": "white",
+                    },
+                },
+                name="出発地",
+                hovertemplate=(
+                    "<b>%{text}</b><br>"
+                    "出発地"
+                    "<extra></extra>"
+                ),
+            )
+        )
+
+        figure.add_trace(
+            go.Scatter(
+                x=[
+                    goal_place["x"]
+                ],
+                y=[
+                    goal_place["y"]
+                ],
+                mode="markers+text",
+                text=[
+                    goal_place["name"]
+                ],
+                textposition=(
+                    "bottom center"
+                ),
+                marker={
+                    "size": 22,
+                    "symbol": "star",
+                    "color": "#54a8e8",
+                    "line": {
+                        "width": 2,
+                        "color": "white",
+                    },
+                },
+                name="目的地",
+                hovertemplate=(
+                    "<b>%{text}</b><br>"
+                    "目的地"
+                    "<extra></extra>"
+                ),
+            )
+        )
+
+    # 立ち寄る店を強調
+    planned_places = [
         place_by_id[
             place_id
         ]
@@ -935,21 +1478,21 @@ def create_route_figure(
         go.Scatter(
             x=[
                 place["x"]
-                for place in planned
+                for place
+                in planned_places
             ],
             y=[
                 place["y"]
-                for place in planned
+                for place
+                in planned_places
             ],
             mode="markers",
             marker={
                 "size": 27,
-                "symbol": (
-                    "circle-open"
-                ),
+                "symbol": "circle-open",
                 "line": {
                     "width": 4,
-                    "color": "#ffd166",
+                    "color": "#f5a0aa",
                 },
             },
             name="立ち寄る店",
@@ -997,6 +1540,10 @@ def create_route_figure(
 
     return figure
 
+
+# ==================================================
+# 画面
+# ==================================================
 
 st.markdown(
     """
@@ -1046,31 +1593,42 @@ left, right = st.columns(2)
 with left:
     start_name = st.selectbox(
         "出発地",
-        start_places,
+        endpoint_places,
+        index=0,
     )
 
     walk_minutes = st.slider(
         "歩ける時間",
-        20,
-        90,
-        45,
-        5,
+        min_value=20,
+        max_value=90,
+        value=45,
+        step=5,
         format="%d分",
     )
 
     budget = st.slider(
         "予算",
-        300,
-        2000,
-        1000,
-        100,
+        min_value=300,
+        max_value=2000,
+        value=1000,
+        step=100,
         format="%d円",
     )
 
 with right:
+    default_goal_index = (
+        endpoint_places.index(
+            "市立図書館"
+        )
+        if "市立図書館"
+        in endpoint_places
+        else 0
+    )
+
     goal_name = st.selectbox(
         "目的地",
-        goal_places,
+        endpoint_places,
+        index=default_goal_index,
     )
 
     default_foods = [
@@ -1093,14 +1651,19 @@ with right:
 
     hunger_level = st.slider(
         "空腹度",
-        1,
-        5,
-        3,
+        min_value=1,
+        max_value=5,
+        value=3,
         help=(
             "1は少しだけ、"
             "5はかなり空腹です。"
         ),
     )
+
+st.caption(
+    "出発地と目的地は同じ地点でも選べます。"
+    "同じ地点を選ぶと、そこへ戻る周遊ルートを提案します。"
+)
 
 mood = st.selectbox(
     "今日の気分",
@@ -1114,20 +1677,22 @@ if st.button(
     type="primary",
     width="stretch",
 ):
-    candidates = (
-        generate_candidates(
-            name_to_id[
-                start_name
-            ],
-            name_to_id[
-                goal_name
-            ],
-            selected_foods,
-            walk_minutes,
-            budget,
-            hunger_level,
-            mood,
-        )
+    start_id = name_to_id[
+        start_name
+    ]
+
+    goal_id = name_to_id[
+        goal_name
+    ]
+
+    candidates = generate_candidates(
+        start_id=start_id,
+        goal_id=goal_id,
+        selected_foods=selected_foods,
+        walk_minutes=walk_minutes,
+        budget=budget,
+        hunger_level=hunger_level,
+        mood=mood,
     )
 
     recommended_routes = (
@@ -1156,7 +1721,7 @@ if st.button(
                 for index, route
                 in enumerate(
                     recommended_routes,
-                    1,
+                    start=1,
                 )
             ]
         )
@@ -1178,7 +1743,7 @@ if st.button(
                 tabs,
                 recommended_routes,
             ),
-            1,
+            start=1,
         ):
             with tab:
                 stop_names = [
@@ -1188,22 +1753,27 @@ if st.button(
                 ]
 
                 reason = create_reason(
-                    selected_foods,
-                    route,
-                    walk_minutes,
-                    budget,
-                    mood,
+                    selected_foods=selected_foods,
+                    route=route,
+                    walk_minutes=walk_minutes,
+                    budget=budget,
+                    mood=mood,
+                    same_endpoint=(
+                        start_id
+                        == goal_id
+                    ),
                 )
 
                 st.markdown(
-                    (
-                        '<div class="route-card">'
-                        f"<h3>{index}位　"
-                        f'{" → ".join(stop_names)}'
-                        "</h3>"
-                        f"<p>{reason}</p>"
-                        "</div>"
-                    ),
+                    f"""
+                    <div class="route-card">
+                        <h3>
+                            {index}位　
+                            {" → ".join(stop_names)}
+                        </h3>
+                        <p>{reason}</p>
+                    </div>
+                    """,
                     unsafe_allow_html=True,
                 )
 
@@ -1257,6 +1827,32 @@ if st.button(
                         route_names
                     )
                 )
+
+                if route[
+                    "diversity_fallback"
+                ]:
+                    st.info(
+                        "別の道を通る候補では"
+                        "相性スコアが大きく下がるため、"
+                        "上位ルートと一部同じ道を通る案を"
+                        "表示しています。"
+                    )
+
+                elif index > 1:
+                    route_difference = round(
+                        (
+                            1
+                            - route[
+                                "overlap_with_higher"
+                            ]
+                        )
+                        * 100
+                    )
+
+                    st.caption(
+                        "上位ルートとの経路差："
+                        f"{route_difference}%"
+                    )
 
                 stop_df = pd.DataFrame(
                     [
@@ -1344,7 +1940,7 @@ if st.button(
                                     max_value=100,
                                     format="%d%%",
                                 )
-                            )
+                            ),
                         },
                     )
 
@@ -1355,11 +1951,13 @@ if st.button(
 
                     st.plotly_chart(
                         create_route_figure(
-                            route
+                            route=route,
+                            start_id=start_id,
+                            goal_id=goal_id,
                         ),
                         width="stretch",
                         config={
-                            "displayModeBar": False
+                            "displayModeBar": False,
                         },
                     )
 
@@ -1372,10 +1970,8 @@ if st.button(
                     st.warning(
                         "この案は希望条件を"
                         "一部超えています。"
-                        "条件内の候補が"
-                        "少ないため、"
-                        "近い案として"
-                        "表示しています。"
+                        "条件内の候補が少ないため、"
+                        "近い案として表示しています。"
                     )
 
 with st.expander(
@@ -1395,8 +1991,18 @@ with st.expander(
         空腹度、食感の変化、
         店の珍しさを重み付きで評価します。
 
-        その後、推薦スコアが高いルートを
-        Top-N形式で3件表示します。
+        上位3件を選ぶ際は、
+        立ち寄る店だけでなく、
+        実際に通る道路の重複率も比較します。
+
+        希望条件との相性が
+        大きく下がらない範囲では、
+        上位案と異なる道を通るルートを
+        優先します。
+
+        別経路の相性スコアが
+        1位より12点以上低くなる場合に限り、
+        一部同じ道を通る候補を表示します。
         """
     )
 
